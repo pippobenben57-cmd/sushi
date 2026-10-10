@@ -123,6 +123,11 @@ h3{font-size:.8rem;font-weight:600;letter-spacing:.3em;color:var(--ink-soft);mar
 .src ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:5px;max-width:60em}
 .src b{color:var(--ink);font-weight:600}
 .src a{color:inherit;text-underline-offset:3px;word-break:break-all}
+.qin{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:.86rem;color:var(--ink-soft)}
+.qin button{border:1px solid var(--ink);padding:4px 14px;line-height:1.6;color:var(--ink)}
+.qin button:hover{background:var(--ink);color:var(--bg)}
+.qin button[aria-pressed="true"]{background:var(--seal);border-color:var(--seal);color:var(--seal-ink)}
+.qin input[type=range]{width:84px;accent-color:var(--seal)}
 /* 全集 */
 input[type=search]{font:inherit;font-size:.92rem;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:6px 12px;width:100%;border-radius:0}
 input[type=search]::placeholder{color:var(--ink-soft)}
@@ -175,6 +180,7 @@ input[type=search]::placeholder{color:var(--ink-soft)}
   <header>
     <h1>苏轼行迹图</h1>
     <p class="sub">1037—1101 · 三十站 · 从眉山到常州。点地图上的地名，或顺着年表一站一站走；每站末尾有那里写下的全部诗、词、文。</p>
+    <div class="qin"><button type="button" id="qinBtn" aria-pressed="false">琴声 · 开</button><input type="range" id="qinVol" min="0" max="100" value="55" aria-label="琴声音量" hidden></div>
   </header>
 
   <nav class="strip" id="strip" aria-label="年表"></nav>
@@ -207,6 +213,7 @@ input[type=search]::placeholder{color:var(--ink-soft)}
       <li><b>简体文字</b>　由繁体经 OpenCC 自动转换，个别字可能与通行本不同。</li>
       <li><b>各站概述、大事、人物交集</b>　由 AI（Claude）撰写，只对照墓志铭核过事件的有无与先后，具体月日和轶事未逐条查证；标“相传”的是传闻。</li>
       <li><b>作品归站</b>　诗依编年诗集的次序划分，书信依原书的时段标记，题跋依文中年号干支，词依题序与通行说法，都由程序和 AI 判断，交界处可能有误。</li>
+      <li><b>琴声</b>　由浏览器现场合成，按古琴正调的五声音阶随机生成，不是录音，也不是某一首琴曲。</li>
       <li><b>地图</b>　为手绘示意，海岸与河道按今天的走向简化，不代表宋代地理，也不是精确地图。</li>
     </ul>
   </footer>
@@ -701,5 +708,97 @@ const m=/^#s(\d+)$/.exec(location.hash);
 go(m?+m[1]-1:0);
 </script>
 
+<script>
+/* ---------- 琴声：浏览器现场合成，不是录音 ----------
+   拨弦用 Karplus-Strong 算法模拟丝弦，音高取古琴正调的五声（F 宫：F G A C D），
+   随机生成慢速乐句，夹杂泛音、八度双音和上下滑音。必须由点击启动。 */
+(function(){
+  const btn=document.getElementById("qinBtn"),vol=document.getElementById("qinVol");
+  if(!btn)return;
+  const AC=window.AudioContext||window.webkitAudioContext;
+  if(!AC){btn.disabled=true;btn.textContent="此浏览器不支持琴声";return;}
+  let ctx=null,master=null,wet=null,on=false,timer=null,nextT=0,deg=6,cache={};
+  /* 音阶：从 C2 到 D4 的五声音级（Hz） */
+  const SCALE=[65.41,73.42,87.31,98.00,110.00,130.81,146.83,174.61,196.00,220.00,261.63,293.66];
+  function pluckBuffer(freq,dark,secs){
+    const key=freq.toFixed(2)+"|"+dark+"|"+secs;if(cache[key])return cache[key];
+    const sr=ctx.sampleRate,N=Math.max(2,Math.round(sr/freq)),len=Math.floor(sr*secs);
+    const buf=ctx.createBuffer(1,len,sr),d=buf.getChannelData(0);
+    /* 初始激励：噪声，先抹几遍让音色发暗，像丝弦而不是钢弦 */
+    const ex=new Float32Array(N);for(let i=0;i<N;i++)ex[i]=Math.random()*2-1;
+    for(let p=0;p<dark;p++){let prev=ex[N-1];for(let i=0;i<N;i++){const c=ex[i];ex[i]=(c+prev)*.5;prev=c;}}
+    let peak=0;for(let i=0;i<N;i++){d[i]=ex[i];peak=Math.max(peak,Math.abs(ex[i]));}
+    const decay=Math.pow(.001,1/(freq*Math.min(secs,2.2+260/freq)));   /* 低音留得久，高音散得快 */
+    for(let i=N;i<len;i++)d[i]=decay*.5*(d[i-N]+d[i-N-1>=0?i-N-1:i-N]);
+    const g=.9/(peak||1),a=Math.floor(sr*.004),f=Math.floor(sr*.4);
+    for(let i=0;i<len;i++){let e=g;if(i<a)e*=i/a;if(i>len-f)e*=(len-i)/f;d[i]*=e;}
+    buf._rate=freq/(sr/(N+.5));
+    return cache[key]=buf;
+  }
+  function pluck(freq,t,gain,opt){
+    opt=opt||{};
+    const buf=pluckBuffer(freq,opt.harm?6:3,opt.harm?4:7);
+    const s=ctx.createBufferSource(),g=ctx.createGain();
+    s.buffer=buf;s.playbackRate.setValueAtTime(buf._rate,t);
+    if(opt.slide){   /* 绰、注：按音后滑向邻音 */
+      s.playbackRate.setValueAtTime(buf._rate,t+.45);
+      s.playbackRate.linearRampToValueAtTime(buf._rate*opt.slide,t+.95);
+    }
+    g.gain.value=gain;s.connect(g);g.connect(master);g.connect(wet);s.start(t);
+  }
+  function impulse(secs){
+    const sr=ctx.sampleRate,len=Math.floor(sr*secs),b=ctx.createBuffer(2,len,sr);
+    for(let c=0;c<2;c++){const d=b.getChannelData(c);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,3.2);}
+    return b;
+  }
+  const pick=a=>a[Math.floor(Math.random()*a.length)];
+  function phrase(){
+    /* 一句三到七个音，在音阶上小步游走，句末落在宫或徵上，然后留白 */
+    let t=Math.max(nextT,ctx.currentTime+.15);
+    const n=3+Math.floor(Math.random()*5),harm=Math.random()<.18;
+    for(let k=0;k<n;k++){
+      deg+=pick([-2,-1,-1,1,1,2,0]);deg=Math.max(1,Math.min(SCALE.length-2,deg));
+      if(k===n-1)deg=pick([2,5,7,10].filter(x=>Math.abs(x-deg)<=3))??deg;
+      const f=SCALE[deg],dur=pick([1.1,1.5,1.5,2.1,2.8]);
+      if(harm){pluck(f*2,t,.16,{harm:true});}
+      else{
+        const r=Math.random();
+        let slide=0;
+        if(r<.2)slide=SCALE[deg+1]/f;else if(r<.34)slide=SCALE[deg-1]/f;
+        pluck(f,t,.34+Math.random()*.12,{slide});
+        if(Math.random()<.16)pluck(SCALE[Math.max(0,deg-5)],t+.02,.26);        /* 撮：带一个低八度 */
+      }
+      t+=dur;
+    }
+    nextT=t+2.5+Math.random()*4.5;
+  }
+  function loop(){
+    if(!on)return;
+    if(nextT-ctx.currentTime<1.5)phrase();
+    timer=setTimeout(loop,400);
+  }
+  function setVol(){if(master)master.gain.setTargetAtTime(Math.pow(vol.value/100,1.6)*.9,ctx.currentTime,.05);}
+  function start(){
+    if(!ctx){
+      ctx=new AC();master=ctx.createGain();
+      const lp=ctx.createBiquadFilter();lp.type="lowpass";lp.frequency.value=3200;
+      const conv=ctx.createConvolver();conv.buffer=impulse(3.6);
+      wet=ctx.createGain();wet.gain.value=.32;
+      wet.connect(conv);conv.connect(master);master.connect(lp);lp.connect(ctx.destination);
+      window.__qin={ctx,master};
+    }
+    ctx.resume();on=true;nextT=0;setVol();loop();
+    btn.setAttribute("aria-pressed","true");btn.textContent="琴声 · 关";vol.hidden=false;
+  }
+  function stop(){
+    on=false;clearTimeout(timer);
+    if(ctx){master.gain.setTargetAtTime(0,ctx.currentTime,.4);setTimeout(()=>{if(!on)ctx.suspend();},1800);}
+    btn.setAttribute("aria-pressed","false");btn.textContent="琴声 · 开";vol.hidden=true;
+  }
+  btn.addEventListener("click",()=>on?stop():start());
+  vol.addEventListener("input",setVol);
+  document.addEventListener("visibilitychange",()=>{if(!ctx||!on)return;document.hidden?ctx.suspend():ctx.resume();});
+})();
+</script>
 </body>
 </html>
